@@ -1,0 +1,1 @@
+SHA256(corrupted1.txt)= 87ed3c2c3668ee4af0005a7d8225bbd42b04da9dea6b8304e3714449bd90c40b

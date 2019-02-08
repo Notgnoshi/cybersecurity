@@ -1,0 +1,1 @@
+MD5(plain1.txt)= 25f1218e13006dc220fb9dd239c465f8
