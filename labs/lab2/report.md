@@ -288,13 +288,223 @@ which actually sleeps for the given number of seconds.
 
 First, I ran the program with the usual permissions and user. This resulted in a successful `LD_PRELOAD` injection.
 
-![Running the program as a normal user](figures/6-c-a.png)
+![Running the program as a normal user](figures/6-d-a-seed-seed.png)
 
 Then I made the `myprog` program a `setuid` program owned by root, and ran it as a normal user. This
 did not result in the `LD_PRELOAD` injection working.
 
-![Running the `setuid` root program as a normal user](figures/6-c-b.png)
+![Running the `setuid` root program as a normal user](figures/6-d-b-root-seed.png)
 
-# TODO: I need to redo this. The environment variable does not seem to have been set when changing user accounts.
+But then when I ran the program again as the root user, it *did* result in a successful injection.
+
+![Running the `setuid` root program as root](figures/6-d-c-root-root.png)
+
+Finally, I created a new `user1` user and changed `myprog` to be owned by `user1` and to be a
+`setuid` program. Running this program as the `seed` user did not result in a successful injection
+attack.
+
+![Running the `setuid` `user1` program as `seed`](figures/6-d-d-user1-seed.png)
+
+But running the program again as the `user1` user confirmed my suspicion that the runtime linker
+only makes use of the `LD_PRELOAD` environment variable on `setuid` programs if the user running the
+program is its owner.
+
+![Running the `setuid` program as `user1`](figures/6-d-e-user1-user1.png)
+
+The following snippet from the `ld.so(8)` man page confirms this suspicion.
+
+> Secure-execution mode
+>
+> For security reasons, the effects of some environment variables
+> are voided or modified if the dynamic linker determines that the
+> binary should be run in secure-execution mode. (For details, see
+> the discussion of individual environment variables below.)  A
+> binary is executed in secure-execution mode if the `AT_SECURE` entry
+> in the auxiliary vector (see `getauxval(3)`) has a nonzero value.
+> This entry may have a nonzero value for various reasons, including:
+>
+> * The process's real and effective user IDs differ, or the real
+>   and effective group IDs differ. This typically occurs as a
+>   result of executing a set-user-ID or set-group-ID program.
+>
+> * A process with a non-root user ID executed a binary that
+>   conferred capabilities to the process.
+>
+> * A nonzero value may have been set by a Linux Security Module.
+
+Later in the man page, it states the following specifically about the `LD_PRELOAD` environment
+variable.
+
+> In secure-execution mode, preload pathnames containing slashes
+> are ignored. Furthermore, shared objects are preloaded only
+> from the standard search directories and only if they have
+> set-user-ID mode bit enabled (which is not typical).
+
+So there are two reasons `ld.so` refused to link our imposter `void sleep( int )` function. First,
+our pathname in `LD_PRELOAD` contained a slash, and was thus ignored. Second, share objects are
+preloaded only from the standard search directories if the `setuid` bit is set.
+
+The reason we were able to successfully inject our imposter function when running the non-`setuid`
+program as the `seed` user was that secure-execution mode was never triggers. Secure-execution mode
+was also not triggered when running the `user1` `setuid` program as the `user1` user, and the `root`
+`setuid` program as the `root` user because the real and effective user IDs did not differ in those
+cases.
+
+This also explains why the injection failed when running the program with `sudo`, but succeeded in
+the `sudo bash` environment. When running the program with `sudo`, the real and effective user IDs
+are not the same. But when running `sudo bash`, you become the `root` user, instead of temporarily
+assuming root privileges. Thus in the second case, the real and effective user IDs are the same.
 
 ## Relinquishing Setuid Privileges and `open(2)`
+
+In this portion of the lab, I examined how programs should properly relinquish root privileges once
+they are finished with them. This is a good practice, because it diminishes the available attack
+surface to take advantage of.
+
+One of the methods to relinquish root privileges is to use the `setuid(2)` and `getuid(2)` functions
+to set the user ID to the real user ID (`geteuid(2)` gets the effective user ID).
+
+To examine one of the considerations of relinquishing escalated privileges, I wrote and ran the
+following program.
+
+```c
+#include<fcntl.h>
+#include<stdio.h>
+#include<stdlib.h>
+#include<sys/stat.h>
+#include<sys/types.h>
+
+int main()
+{
+    // Assume that /etc/zzz is an important system file owned by root with
+    // permission 0644.
+    int fd = open( "/etc/zzz", O_RDWR | O_APPEND );
+    if( fd < 0 )
+    {
+        printf( "Cannot open '/etc/zzz'\n" );
+        return 1;
+    }
+
+    // ...
+
+    // Now relenquish the root privileges.
+    // Note that getuid() returns the real uid.
+    setuid( getuid() );
+
+    if( fork() )
+    {
+        close( fd );
+        return 0;
+    }
+    else
+    {
+        // Now assume attackers have injected malicious code, possibly
+        // with LD_PRELOAD here.
+        write( fd, "Malicious Data\n", 15 );
+        close( fd );
+    }
+
+    return 0;
+}
+```
+
+Note that because the program `fork(2)`'s the process after relinquishing its root privileges,
+`ld.so(8)` will not enter the secure-execution mode discussed above, so it should be possible to
+use `LD_PRELOAD` to inject arbitrary code in any dynamically loaded function calls in the child
+process.
+
+What I noticed from this program, is that I was still able to write to a `root`-owned file
+*even after the escalated privileges were relinquished!*
+
+![The program writing malicious data even after root privileges were relinquished](figures/7-open-root-fd.png)
+
+My suspicion was that this was a consequence of using `fork(2)`, but that turned out to not be the
+case. The following similar program also exhibited the same behavior.
+
+```c
+#include<fcntl.h>
+#include<stdio.h>
+#include<stdlib.h>
+#include<sys/stat.h>
+#include<sys/types.h>
+
+int main()
+{
+    int fd = open( "/etc/zzz", O_RDWR | O_APPEND );
+    if( fd < 0 )
+    {
+        printf( "Cannot open '/etc/zzz'\n" );
+        return 1;
+    }
+
+    setuid( getuid() );
+
+    write( fd, "Malicious Data\n", 15 );
+    close( fd );
+
+    return 0;
+}
+```
+
+This is because file permissions are checked when the file is *opened*, and not on subsequent writes.
+If we modify the program to attempt to open the root file again after relinquishing the root
+privileges it will fail to write the second line of malicious data.
+
+Further, the `fork(2)` man page states the following
+
+> The child inherits copies of the parent's set of open file descriptors.
+> Each file descriptor in the child refers to the same open file description
+> (see `open(2)`) as the corresponding file descriptor in the parent. This means
+> that the two file descriptors share open file status flags, file offset, and
+> signal-driven I/O attributes (see the description of `F_SETOWN` and `F_SETSIG`
+> in `fcntl(2)`).
+
+This means that the child process will be able to read and/or write to any open files from the parent
+process, depending on the mode they were opened in. Thus any files opened with root privileges
+should be closed before any privileges are relinquished, and definitely before the program is forked.
+
+```c
+#include<fcntl.h>
+#include<stdio.h>
+#include<stdlib.h>
+#include<sys/stat.h>
+#include<sys/types.h>
+
+int main()
+{
+    int fd = open( "/etc/zzz", O_RDWR | O_APPEND );
+    if( fd < 0 )
+    {
+        printf( "Cannot open '/etc/zzz'\n" );
+        return 1;
+    }
+
+    setuid( getuid() );
+
+    // This write will succeed.
+    write( fd, "Malicious Data\n", 15 );
+    close( fd );
+
+    fd = open( "/etc/zzz", O_RDWR | O_APPEND );
+    // We cannot open the file without the root privileges
+    if( fd < 0 )
+    {
+        printf( "Cannot open '/etc/zzz'\n" );
+        return 1;
+    }
+
+    // This write will fail.
+    write( fd, "Malicious Data\n", 15 );
+    close( fd );
+
+    return 0;
+}
+```
+
+Now, as the above discussion of `LD_PRELOAD` indicates, it may be difficult to inject malicious code
+to write the malicious data without forking, because `ld.so(8)` will ignore `LD_PRELOAD` if the real
+and effective user IDs running the program differ.
+
+But if the program is forked, the real and effective user IDs of the child process will match, and I
+believe that an `LD_PRELOAD` injection will be successful. Due to time constraints, I did not test
+this theory.
