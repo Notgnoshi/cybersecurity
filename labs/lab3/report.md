@@ -258,11 +258,272 @@ In either case, it was possible to perform the injection without the extension, 
 
 Note that `bob`'s profile page now contains the dummy company and email we provided.
 
-# TODO:
 ## The Magic Quotes Countermeasure
 
-# TODO:
+As a part of the setup for this lab, I disabled the magic quote preprocessing feature of PHP 5.
+The magic quote preprocessing is a SQL injection (among other attacks) countermeasure.
+
+To examine its impact, I set the following value in `/etc/php5/apache2/php.ini`
+
+```ini
+magic_quotes_gpc = On
+```
+
+to reenable the magic quoting. The I restarted Apache and attempted the SQL injection attacks again.
+
+The injection attack on the login page failed.
+
+![The attempted SQL injection with magic quoting](figures/magic-quotes-login.png)
+
+The injections also failed on the edit profile page.
+
+![The attempted SQL injection with magic quoting](figures/magic-quotes-profile.png)
+
+![Alice's new fancy profile page](figures/magic-quotes-profile-results.png)
+
 ## The String Escaping Countermeasure
 
-# TODO:
+In this portion of the lab, magic quotes were turned back off, and the `mysql_real_escape_string()` function calls were uncommented.
+That is, I changed the login and profile editing code from
+
+```php
+//modified for SQL Lab
+//$user = mysql_real_escape_string($user);
+//$pass = mysql_real_escape_string($pass);
+```
+
+and
+
+```php
+//modified for SQL Lab
+//$company = mysql_real_escape_string($company);
+```
+
+to
+
+```php
+$user = mysql_real_escape_string($user);
+$pass = mysql_real_escape_string($pass);
+```
+
+and
+
+```php
+$company = mysql_real_escape_string($company);
+```
+
+respectively. Then I restarted Apache to enable my changes.
+
+The injection on both pages failed, with no differences between magic quoting and string escaping.
+
+![The attempted SQL injection with string escaping](figures/magic-quotes-login.png)
+
+![The attempted SQL injection with string escaping](figures/magic-quotes-profile.png)
+
+![Alice's new fancy profile page after string escaping](figures/magic-quotes-profile-results.png)
+
+I somewhat expected the updated entries in Alice's profile page to contain backslashes. It is possible that they *do* contain backslashes, but they are not being displayed. I do not know of an easy way to verify if this is the case.
+
 ## The Query Preparation Countermeasure
+
+For the login page, I modified the following PHP code
+
+```php
+function login($user, $pass)
+{
+    if (!$user)
+    {
+        return false;
+    }
+    $user = mysql_real_escape_string($user);
+    $pass = mysql_real_escape_string($pass);
+    $pass = sha1($pass);
+
+    $sel1 = mysql_query("SELECT ID,name,locale,lastlogin,gender FROM user WHERE (name = '$user' OR email = '$user') AND pass =     '$pass'");
+    $chk = mysql_fetch_array($sel1);
+
+    if ($chk["ID"] != "")
+    {
+        $rolesobj = new roles();
+        $now = time();
+        $_SESSION['userid'] = $chk['ID'];
+        $_SESSION['username'] = stripslashes($chk['name']);
+        $_SESSION['lastlogin'] = $now;
+        $_SESSION['userlocale'] = $chk['locale'];
+        $_SESSION['usergender'] = $chk['gender'];
+        $_SESSION["userpermissions"] = $rolesobj->getUserRole($chk["ID"]);
+        $userid = $_SESSION['userid'];
+        $seid = session_id();
+        $staylogged = getArrayVal($_POST, 'staylogged');
+        if ($staylogged == 1)
+        {
+            setcookie("PHPSESSID", "$seid", time() + 14 * 24 * 3600);
+        }
+        $upd1 = mysql_query("UPDATE user SET lastlogin = '$now' WHERE ID = $userid");
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+```
+
+to look like this:
+
+```php
+function login($user, $pass)
+{
+    if (!$user)
+    {
+        return false;
+    }
+    // $user = mysql_real_escape_string($user);
+    // $pass = mysql_real_escape_string($pass);
+    $pass = sha1($pass);
+
+    $db = new mysqli("localhost", "root", "seedubuntu", "sql_collabtive_db");
+    $statement = $db->prepare("SELECT ID, name, locale, lastlogin, gender FROM user WHERE (name=? OR email=?) AND pass=?");
+    // Note that $user appears twice because it's used twice in the query.
+    $statement->bind_param("sss", $user, $user, $pass);
+    $statement->execute();
+    $statement->bind_result($id_, $name_, $locale_, $lastlogin_, $gender_);
+    // Get the first matching record.
+    $chk = $statement->fetch();
+
+    $statement->close();
+    $db->close();
+
+    if ($chk)
+    {
+        $rolesobj = new roles();
+        $now = time();
+        $_SESSION['userid'] = $id_;
+        $_SESSION['username'] = stripslashes($name_);
+        $_SESSION['lastlogin'] = $now;
+        $_SESSION['userlocale'] = $locale_;
+        $_SESSION['usergender'] = $gender_;
+        $_SESSION["userpermissions"] = $rolesobj->getUserRole($id_);
+        $userid = $_SESSION['userid'];
+        $seid = session_id();
+        $staylogged = getArrayVal($_POST, 'staylogged');
+        if ($staylogged == 1)
+        {
+            setcookie("PHPSESSID", "$seid", time() + 14 * 24 * 3600);
+        }
+        $upd1 = mysql_query("UPDATE user SET lastlogin = '$now' WHERE ID = $userid");
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+```
+
+Note that I disabled the string escaping from the previous step of the lab. Then on the update profile information page, I updated
+
+```php
+function edit($id, $name, $realname, $email, $tel1, $tel2, $company, $zip, $gender, $url, $address1, $address2, $state, $country, $tags, $locale, $avatar = "", $rate = 0.0)
+{
+    $name = mysql_real_escape_string($name);
+    $realname = mysql_real_escape_string($realname);
+    $company = mysql_real_escape_string($company);
+    $email = mysql_real_escape_string($email);
+    $tel1 = mysql_real_escape_string($tel1);
+    $tel2 = mysql_real_escape_string($tel2);
+    $zip = mysql_real_escape_string($zip);
+    $gender = mysql_real_escape_string($gender);
+    $url = mysql_real_escape_string($url);
+    $address1 = mysql_real_escape_string($address1);
+    $address2 = mysql_real_escape_string($address2);
+    $state = mysql_real_escape_string($state);
+    $country = mysql_real_escape_string($country);
+    $tags = mysql_real_escape_string($tags);
+    $locale = mysql_real_escape_string($locale);
+    $avatar = mysql_real_escape_string($avatar);
+
+    $rate = (float) $rate;
+    $id = (int) $id;
+
+    if ($avatar != "")
+    {
+        $upd = mysql_query("UPDATE user SET name='$name', email='$email', tel1='$tel1', tel2='$tel2', company='$company', zip='$zip', gender='$gender', url='$url', adress='$address1', adress2='$address2', state='$state', country='$country', tags='$tags', locale='$locale', avatar='$avatar', rate='$rate' WHERE ID = $id");
+    }
+    else
+    {
+        $upd = mysql_query("UPDATE user SET name='$name',email='$email', tel1='$tel1', tel2='$tel2', company='$company', zip='$zip', gender='$gender', url='$url', adress='$address1', adress2='$address2', state='$state', country='$country', tags='$tags', locale='$locale', rate='$rate' WHERE ID = $id");
+    }
+
+    if ($upd)
+    {
+        $this->mylog->add($name, 'user', 2, 0);
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+```
+
+to look like this:
+
+```php
+function edit($id, $name, $realname, $email, $tel1, $tel2, $company, $zip, $gender, $url, $address1, $address2, $state, $country, $tags, $locale, $avatar = "", $rate = 0.0)
+{
+    $rate = (float) $rate;
+    $id = (int) $id;
+
+    $db = new mysqli("localhost", "root", "seedubuntu", "sql_collabtive_db");
+
+    if( $avatar != "" )
+    {
+        $statement = $db->prepare("UPDATE user SET name=?, email=?, tel1=?, tel2=?, company=?, zip=?, gender=?, url=?, adress=?, adress2=?, state=?, country=?, tags=?, locale=?, avatar=?, rate=? WHERE ID=?");
+        $statement->bind_param("sssssssssssssssdi", $name, $email, $tel1, $tel2, $company, $zip, $gender, $url, $address1, $address2, $state, $country, $tags, $locale, $avatar, $rate, $id);
+        $upd = $statement->execute();
+    }
+    else
+    {
+        $statement = $db->prepare("UPDATE user SET name=?, email=?, tel1=?, tel2=?, company=?, zip=?, gender=?, url=?, adress=?, adress2=?, state=?, country=?, tags=?, locale=?, rate=? WHERE ID=?");
+        $statement->bind_param("ssssssssssssssdi", $name, $email, $tel1, $tel2, $company, $zip, $gender, $url, $address1, $address2, $state, $country, $tags, $locale, $rate, $id);
+        $upd = $statement->execute();
+    }
+
+    $statement->close();
+    $db->close();
+
+    if ($upd)
+    {
+        $this->mylog->add($name, 'user', 2, 0);
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+```
+
+As expected, both the login page injection and the injection on the edit profile page were unsuccessful.
+
+---
+
+During editing the above code, I noticed that the user `rate` attribute, which I assume is an hourly wage, is the only non-string attribute being updated, so I wanted to try to perform a SQL injection without relying on closing the quotes in the query string. However, the `rate` attribute is only settable from the admin page, and the admin user can set anything they please so it's a moot point.
+
+As we can see, there is a literal `0` being passed to the `user->edit()` function from the `manageuser.php` file. This means that even modifying the HTTP request with the `rate` field would have no affect.
+
+```shell
+seed@ubuntu /var/www/SQL/Collabtive $ grep -ir "user->edit(" .
+./manageuser.php:        if ($user->edit($userid, $name, $realname, $email, $tel1, $tel2, $company, $zip, $gender, $turl, $address1, $address2, $state, $country, "", $locale, $avatar, 0))
+./manageuser.php:        if ($user->edit($userid, $name, $realname, $email, $tel1, $tel2, $company, $zip, $gender, $turl, $address1, $address2, $state, $country, "", $locale, "", 0))
+./admin.php:             if ($user->edit($id, $name, "" , $email, $tel1, $tel2, $company, $zip, $gender, $turl, $address1, $address2, $state, $country, $tags, $locale, $avatar, $rate))
+./admin.php:             if ($user->edit($id, $name, "", $email, $tel1, $tel2, $company, $zip, $gender, $turl, $address1, $address2, $state, $country, $tags, $locale, "", $rate))
+./admin.php:            $user->edit($theuser["ID"], $theuser["name"], $theuser["realname"], $theuser["email"], $theuser["tel1"], $theuser["tel2"], $theuser["company"], $theuser["zip"], $theuser["gender"], $theuser["url"], $theuser["adress"], $theuser["adress2"], $theuser["state"], $theuser["country"], $theuser["tags"], $locale, "", $theuser["rate"]);
+```
+
+Perhaps the rate field would come in handy on the admin page if there was something in the database you wanted to modify that even the `admin` user did not have permission for.
+
+---
+
+In the interest of time and sanity I did not attempt any further SQL injections, though I am sure that more are possible.
